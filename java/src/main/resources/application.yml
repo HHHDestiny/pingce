@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: multi-agent-aiops
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: aiops-agents
+      auto-offset-reset: latest
+      enable-auto-commit: false
+    producer:
+      acks: all
+      retries: 3
+  neo4j:
+    uri: bolt://localhost:7687
+    authentication:
+      username: neo4j
+      password: aiops_password
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+aiops:
+  monitor:
+    check-interval: 30
+    sigma-threshold: 3.0
+  rca:
+    max-depth: 5
+  heal:
+    dry-run: true
+    max-retries: 3
+    max-blast-radius: 0.2
+  change:
+    auto-approve-threshold: 0.3
+  circuit-breaker:
+    threshold: 5
+    timeout-seconds: 60
