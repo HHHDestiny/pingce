@@ -136,3 +136,6 @@ class IncidentState(BaseModel):
     current_agent: AgentType = AgentType.MONITOR
     retry_count: int = 0
     error_message: Optional[str] = None
+
+    # 上下游 Agent 传递的补充数据（原始告警 payload、接入决策、图谱富化结果等）
+    metadata: dict[str, Any] = Field(default_factory=dict)
