@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from core.event_bus import InMemoryEventBus
 from core.orchestrator import Orchestrator
 from core.knowledge_graph import create_demo_knowledge_graph, InMemoryKnowledgeGraph
+from alerting.alert_ingest import AlertIngestAgent, create_ingest_agent
 from models.events import IncidentState, Severity
 from models.time_series import EnsembleDetector, generate_demo_metrics
 
@@ -32,16 +33,21 @@ logger = logging.getLogger(__name__)
 event_bus = InMemoryEventBus()
 orchestrator: Optional[Orchestrator] = None
 knowledge_graph: Optional[InMemoryKnowledgeGraph] = None
+ingest_agent: Optional[AlertIngestAgent] = None
 incident_history: list[dict[str, Any]] = []
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global orchestrator, knowledge_graph
+    global orchestrator, knowledge_graph, ingest_agent
 
     await event_bus.start()
     orchestrator = Orchestrator(event_bus)
     knowledge_graph = create_demo_knowledge_graph()
+    # mock=True 时不依赖真实 Prometheus，本地可直接跑通整条链路
+    ingest_agent = create_ingest_agent(
+        event_bus, knowledge_graph=knowledge_graph, mock=True
+    )
 
     logger.info("AIOps Multi-Agent System started")
     yield
@@ -104,6 +110,58 @@ async def trigger_incident(request: TriggerRequest):
         "workflow": orchestrator.get_workflow_status(),
     }
 
+    incident_history.append(result)
+    return result
+
+
+@app.post("/api/v1/alerts/webhook")
+async def receive_alert(payload: dict):
+    """告警 webhook 入口 —— 夜莺 / AlertManager 推告警到这里
+
+    这是生产环境的真实入口：监控系统负责采集和阈值判定，
+    本系统负责接入后的降噪、根因分析、自愈与审批。
+
+    payload 示例（夜莺风格）：
+    {
+      "rule_name": "cpu_usage_high",
+      "severity": 1,
+      "res_ident": "order-service",
+      "trigger_value": "95.3",
+      "trigger_time": 1730000000,
+      "tags": ["__name__=cpu_usage_percent", "service=order-service"]
+    }
+    """
+    state = IncidentState(metadata={"raw_alert": payload})
+
+    # 第一步：接入与降噪（二次确认未通过就直接抑制，不进入后续流程）
+    state = await ingest_agent.handle(state)
+    decision = state.metadata.get("ingest_decision", {})
+
+    if decision.get("action") == "suppressed":
+        return {
+            "incident_id": state.incident_id,
+            "status": "suppressed",
+            "ingest": decision,
+            "message": "二次确认未通过，判定为抖动，已抑制",
+        }
+
+    if not state.alert_event:
+        return {"incident_id": state.incident_id, "status": "ignored", "ingest": decision}
+
+    # 第二步：确认后的告警走完整 Agent 链路（monitor 节点会自动跳过）
+    state = await orchestrator.run(initial_state=state)
+
+    result = {
+        "incident_id": state.incident_id,
+        "status": state.status,
+        "ingest": decision,
+        "enrichment": state.metadata.get("enrichment", {}),
+        "alert": _serialize_alert(state),
+        "rca": _serialize_rca(state),
+        "heal": _serialize_heal(state),
+        "change": _serialize_change(state),
+        "workflow": orchestrator.get_workflow_status(),
+    }
     incident_history.append(result)
     return result
 

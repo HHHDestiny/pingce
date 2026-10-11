@@ -95,7 +95,10 @@ class Orchestrator:
             WorkflowNode(
                 name="monitor",
                 agent=monitor,
-                condition=None,  # 始终执行
+                # 实际架构里告警由夜莺/Prometheus 通过 webhook 推入，此时 state 里
+                # 已经有 alert_event，无需再走一次采集检测，直接跳过进入 RCA。
+                # 只有在没有外部告警时（本地 Demo）才由本节点生成模拟告警。
+                condition=lambda s: s.alert_event is None,
             ),
             WorkflowNode(
                 name="rca",
