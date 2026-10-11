@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Java
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+.idea/
+*.iml
+
+# Go
+golang/server
+*.exe
+*.test
+*.out
+
+# 运行环境 / 本地数据
+.env
+.env.local
+*.log
+*.sqlite3
+data/
+runs/
+
+# 工具目录
+.workbuddy/
+.DS_Store
