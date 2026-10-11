@@ -22,7 +22,8 @@
 - 服务出了问题，排查根因要花 **40 分钟**
 - 凌晨 3 点被电话叫醒，半睡半醒地排查故障
 
-本项目用 **4 个 AI Agent 协作**，自动完成从「告警检测」到「故障修复」的全流程，把 MTTR（平均修复时间）从 40 分钟降到 5 分钟。
+本项目用 **5 个 AI Agent 协作**（1 个告警接入 + 检测 / 根因 / 自愈 / 审批 4 个处理 Agent），
+自动完成从「告警接入降噪」到「故障修复」的全流程，目标是把 MTTR（平均修复时间）从 40 分钟压到 5 分钟。
 
 ```
 告警来了
@@ -55,10 +56,16 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                       数据采集层                              │
-│   Prometheus（指标）  Loki（日志）  Jaeger（链路）  CMDB      │
+│          已有监控系统（已存在，不是本项目做的事）               │
+│   夜莺 / Prometheus + AlertManager：采集 · 存储 · 阈值判定     │
+│   Loki（日志）  Jaeger（链路）  CMDB                          │
 └───────────────────────────┬──────────────────────────────────┘
-                            │ 异常数据
+                            │ webhook POST（告警事件 JSON）
+                   ┌────────▼─────────┐
+                   │  ① 告警接入 Agent  │ ← 标准化 · 指纹去重
+                   │   AlertIngest    │   时序二次确认 · 图谱富化
+                   └────────┬─────────┘
+                            │ 确认后的告警（未通过的在此抑制）
                    ┌────────▼─────────┐
                    │  事件总线 Kafka   │  ← 解耦所有 Agent
                    │  aiops.alerts    │
@@ -81,7 +88,7 @@
 └───────────────────────────┬──────────────────────────────────┘
                             │
 ┌───────────────────────────▼──────────────────────────────────┐
-│                         知识层                                │
+│                      知识层 / 数据源                          │
 │      Neo4j 知识图谱    向量数据库 RAG    规则引擎              │
 │   （服务拓扑 + 依赖关系 + 历史故障）                           │
 └──────────────────────────────────────────────────────────────┘
@@ -90,14 +97,19 @@
 ### 一次故障的完整处理流程
 
 ```
-1. Prometheus 检测到 order-service CPU 使用率 95%
-2. 监控告警 Agent：多算法投票确认异常，生成告警事件
+1. 已有监控系统判定 order-service CPU 95%，webhook 推给本系统
+2. 告警接入 Agent：标准化 payload → 指纹去重 → 反查时序做二次确认
+                   三算法投票通过才放行，否则判定为抖动直接抑制
 3. 根因分析 Agent：查知识图谱，发现 order-service 今天有新部署
                     贝叶斯推理：P(部署引起|CPU高) = 0.54
 4. 故障自愈 Agent：匹配 rollback Playbook（L1级），dry-run 通过
 5. 变更审批 Agent：风险评分 0.16，oncall 自动审批
 6. 执行回滚，5 分钟内恢复正常 ✅
 ```
+
+> **边界说明**：本项目不做采集。第 1 步的采集、存储、阈值判定全部由已有的
+> 夜莺 / Prometheus + AlertManager 完成，本系统只负责告警进来之后的分析与处置。
+> 外部告警进来时编排器会**跳过**监控告警 Agent（它只在本地 Demo 模式下生成模拟告警）。
 
 ---
 
@@ -185,6 +197,17 @@ python -c "import asyncio; from core.orchestrator import run_demo; asyncio.run(r
 ============================================================
 ```
 
+### 方式四：跑异常检测评测（只要 numpy）
+
+```bash
+cd python
+pip install numpy            # scikit-learn 可选，缺失时自动降级
+python benchmarks/anomaly_eval.py
+```
+
+不需要起服务、不需要 Kafka/Neo4j，直接输出四种检测策略的精确率 / 召回率 / 误报率 / F1，
+用于验证「多算法投票 vs 静态阈值」到底提升多少（结果见[核心技术亮点 1](#1-时序异常检测--多算法投票)）。
+
 ---
 
 ## 📁 项目结构详解
@@ -201,6 +224,10 @@ multi-agent-aiops/
 │   │   ├── rca_agent.py             ← 根因分析 Agent
 │   │   ├── heal_agent.py            ← 故障自愈 Agent
 │   │   └── change_agent.py          ← 变更审批 Agent
+│   ├── alerting/
+│   │   └── alert_ingest.py          ← 告警接入 Agent（生产入口，降噪 + 二次确认）
+│   ├── benchmarks/
+│   │   └── anomaly_eval.py          ← 异常检测评测脚本（实测 P/R/FPR/F1）
 │   ├── core/
 │   │   ├── orchestrator.py          ← Agent 编排器（状态机）⭐ 最核心
 │   │   ├── event_bus.py             ← 事件总线（Kafka + 内存双模）⭐
@@ -235,6 +262,8 @@ multi-agent-aiops/
 └── 📚 docs/                         ← 文档（面试必看）
     ├── architecture.md              ← 架构设计文档
     ├── project-plan.md              ← 项目规划
+    ├── explainer/
+    │   └── 实现原理详解.md           ← 按实际架构整理的原理说明与职责边界
     ├── interview/                   ← 🎯 面试材料
     │   ├── resume-template.md       ← 简历模板（3 个版本）
     │   ├── star-method.md           ← STAR 话术（含追问应对）
@@ -254,7 +283,52 @@ multi-agent-aiops/
 
 启动后访问 http://localhost:8000/docs 查看完整文档，核心接口：
 
-### 触发故障处理流程
+### 告警 webhook 入口（生产环境真实入口）
+
+```bash
+# 夜莺 / AlertManager 把告警推到这里
+curl -X POST http://localhost:8000/api/v1/alerts/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rule_name": "cpu_usage_high",
+    "severity": 1,
+    "res_ident": "order-service",
+    "trigger_value": "95.3",
+    "trigger_time": 1730000000,
+    "tags": ["__name__=cpu_usage_percent", "service=order-service"]
+  }'
+```
+
+返回示例（二次确认未通过时会直接 `suppressed`，不进入后续流程）：
+```json
+{
+  "incident_id": "b7f0e2a4-...",
+  "status": "resolved",
+  "ingest": {
+    "action": "confirmed_by_vote",
+    "votes": 3,
+    "score": 5.412,
+    "reason": "三算法投票通过 3/3"
+  },
+  "enrichment": {
+    "dependencies": ["payment-service", "inventory-service"],
+    "impact_score": 0.091,
+    "recent_changes": [{"type": "deploy", "time": "2026-10-11T09:12:00"}]
+  },
+  "rca": {"root_cause": "近期代码部署引入性能退化", "confidence": 0.54},
+  "heal": {"action": "rollback", "level": "L1", "dry_run": true}
+}
+```
+
+`ingest.action` 取值：
+
+| 取值 | 含义 | 后续动作 |
+|------|------|---------|
+| `confirmed_by_vote` | 三算法投票通过，确认为真异常 | 进入 RCA → Heal → Change |
+| `confirmed_by_upstream` | 历史样本不足，或投票未通过但上游判 CRITICAL | 放行人工复核 |
+| `suppressed` | 投票未通过判定为抖动，或指纹重复 | 直接抑制，不进入后续流程 |
+
+### 触发故障处理流程（本地 Demo）
 
 ```bash
 # 使用 Demo 数据（模拟 CPU 告警）
@@ -324,8 +398,29 @@ curl http://localhost:8000/api/v1/anomaly/demo
 EWMA       → 检测趋势（CPU 缓慢上涨）
 Isolation Forest → 检测多维异常（多个指标同时异常）
 
-投票结果：2/3 投票 = 报警  →  误报率降低 85%
+投票结果：2/3 投票 = 报警
 ```
+
+#### 实测数据（不是估值）
+
+跑 `python benchmarks/anomaly_eval.py` 可复现，数据集 600 点、注入 18 个异常、seed=42：
+
+```
+策略                      TP    FP    FN       精确率       召回率       误报率       F1
+--------------------------------------------------------------------------
+静态阈值 (>80)               8    59    10    11.94%    44.44%    11.09%    0.188
+单算法 3-Sigma              6     0    12   100.00%    33.33%     0.00%    0.500
+单算法 EWMA                17     2     1    89.47%    94.44%     0.38%    0.919
+三算法投票 (>=2)             17     0     1   100.00%    94.44%     0.00%    0.971
+投票·全量基线                 14     0     4   100.00%    77.78%     0.00%    0.875
+```
+
+相对静态阈值基线：**误报率 11.09% → 0.00%，F1 0.188 → 0.971**。
+
+> 口径：精确率 = 报出的告警中真异常的比例；误报率 = 正常点被误报的比例。
+> 评测用滚动窗口基线（最近 120 点），最后一行是全量历史基线对照组——用全量历史会把
+> 趋势和季节性算进 std，阈值被拉宽导致召回掉到 77.78%，这也是选滚动基线的原因。
+> 注：这是在合成数据集上的自测结果，不是生产环境指标。
 
 > 📖 算法详解：[docs/tutorial/03-agent-design.md](docs/tutorial/03-agent-design.md)
 
@@ -460,12 +555,15 @@ event_bus = create_event_bus(use_kafka=True)   # 生产环境
 <details>
 <summary>💬 点击展开 — 1 分钟版面试话术</summary>
 
-> "这是一个基于事件驱动的多 Agent AIOps 系统。
-> 四个 Agent 分别负责告警检测、根因分析、故障自愈和变更审批，
+> "这是一个基于事件驱动的多 Agent AIOps 系统，目前处于 POC / 灰度验证阶段。
+> 告警接入 Agent 负责对接已有的夜莺 / Prometheus，做标准化、指纹去重和时序二次确认，
+> 后面四个 Agent 分别负责根因分析、故障自愈、变更审批和检测兜底，
 > 通过 Kafka 事件总线异步协作。
 > 技术亮点是用 Neo4j 知识图谱做根因推理，
 > 多算法投票做异常检测，分级策略加安全护栏做自愈。
-> 上线后 MTTR 降低 87%，告警误报减少 85%。"
+> 降噪效果我做了实测：在 600 点的标注数据集上，相对静态阈值，
+> 误报率从 11.09% 降到 0，F1 从 0.188 提到 0.971——这是合成数据集的自测结果，
+> 不是生产指标，我会如实说明口径。"
 
 详细版（3 分钟）和追问应对脚本见 → [star-method.md](docs/interview/star-method.md)
 
